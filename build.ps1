@@ -3,17 +3,23 @@ param
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]
-    $Command
+    $Command,
+
+    [Parameter(Mandatory = $false)]
+    [string]
+    $VSConfiguration = "Release"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$targetName = (Get-ChildItem -Path "$PSScriptRoot\src" -Recurse -Filter *.csproj | select -First 1).Basename
-$distDir = "$PSScriptRoot\dist"
-$script:installDir = ""
+$script:targetName = (Get-ChildItem -Path "$PSScriptRoot\src" -Recurse -Filter *.csproj | select -First 1).Basename
+$script:distDir = "$PSScriptRoot\dist"
+$script:projectDir = "$PSScriptRoot\src\$script:targetName"
+$script:assemblyInfoFile = "$projectDir\properties\AssemblyInfo.cs"
+$script:installDir = $null
 
-function SetInstallDir
+function getInstallDir
 {
     if (![string]::IsNullOrEmpty($script:installDir))
     {
@@ -32,14 +38,16 @@ function SetInstallDir
         if (Test-Path $dir)
         {
             Write-Host " -> Found RimWorld Path: $dir"
-            $script:installDir =  $dir
-            return
+            return $dir
         }
     }
  
     Write-Host " -> RimWorld not found"
     return $null
 }
+
+$script:installDir = getInstallDir
+
 
 
 function removePath($path)
@@ -65,12 +73,6 @@ function removePath($path)
     }
 }
 
-function getProjectDir
-{
-    return "$PSScriptRoot\src\$targetName"
-}
-
-$assemblyInfoFile = "$(getProjectDir)\properties\AssemblyInfo.cs"
 
 function getGameVersion
 {
@@ -84,7 +86,6 @@ function getGameVersion
 function updateToGameVersion
 {
 
-    SetInstallDir
     if ([string]::IsNullOrEmpty($script:installDir))
     {
     Write-Host -ForegroundColor Red `
@@ -96,19 +97,18 @@ function updateToGameVersion
 
     $gameVersion = getGameVersion
 
-    $content = Get-Content -Raw $assemblyInfoFile
+    $content = Get-Content -Raw $script:assemblyInfoFile
     $newContent = $content -replace '"\d+\.\d+(\.\d+\.\d+")', "`"$gameVersion`$1"
 
     if ($newContent -eq $content)
     {
         return
     }
-    Set-Content -Encoding UTF8 -Path $assemblyInfoFile $newContent
+    Set-Content -Encoding UTF8 -Path $script:assemblyInfoFile $newContent
 }
 
 function copyFilesToRimworld
 {
-    SetInstallDir
     if ([string]::IsNullOrEmpty($script:installDir))
     {
     Write-Host -ForegroundColor Yellow `
@@ -118,11 +118,33 @@ function copyFilesToRimworld
     }
 
     $modsDir = "$script:installDir\Mods"
-    $modDir = "$modsDir\$targetName"
+    $modDir = "$modsDir\$script:targetName"
     removePath $modDir
 
     Write-Host "Copying mod to $modDir"
-    Copy-Item -Recurse -Force -Exclude *.zip "$distDir\*" $modsDir
+    Copy-Item -Recurse -Force -Exclude *.zip "$script:distDir\*" $modsDir
+}
+
+function createModZipFile
+{
+    Write-Host "Creating distro package"
+    $content = Get-Content -Raw $script:assemblyInfoFile
+    if (!($content -match '"(\d+\.\d+\.\d+\.\d+)"'))
+    {
+        throw "Version info not found in $script:assemblyInfoFile"
+    }
+
+    $version = $matches[1]
+    $distZip = "$script:distDir\$script:targetName.$version.zip"
+    removePath $distZip
+    $sevenZip = "$PSScriptRoot\7z.exe"
+    & $sevenZip a -mx=9 "$distZip" "$script:distDir\*"
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "7zip command failed"
+    }
+
+    Write-Host "Created $distZip"
 }
 
 function copyDependencies
@@ -133,12 +155,10 @@ function copyDependencies
         return
     }
 
-    SetInstallDir
     if ([string]::IsNullOrEmpty($script:installDir))
     {
     Write-Host -ForegroundColor Yellow `
         "Rimworld installation not found; see Readme for how to set up pre-requisites manually."
-
     return
     }
 
@@ -152,33 +172,27 @@ function copyDependencies
 function doPreBuild
 {
     Write-Host "doPreBuild"
-    removePath $distDir
+    removePath $script:distDir
     copyDependencies
     updateToGameVersion
 }
 
 function doPostBuild
 {
-    param(
-        [string]$VSConfiguration = "Release"
-    )
     Write-Host "doPostBuild"
 
-    SetInstallDir
     if ([string]::IsNullOrEmpty($script:installDir))
     {
     Write-Host -ForegroundColor Red `
         "Rimworld installation not found; not setting game version."
-
     return
     }
 
+    $distTargetDir = "$script:distDir\$script:targetName"
+    removePath $script:distDir
 
-    $distTargetDir = "$distDir\$targetName"
-    removePath $distDir
-
-    $targetDir = "$(getProjectDir)\bin\Release"
-    $targetPath = "$targetDir\$targetName.dll"
+    $targetDir = "$script:projectDir\bin\$VSConfiguration"
+    $targetPath = "$targetDir\$script:targetName.dll"
 
     $distAssemblyDir = "$distTargetDir\$(getGameVersion)\Assemblies"
     mkdir $distAssemblyDir | Out-Null
@@ -186,7 +200,7 @@ function doPostBuild
     Copy-Item -Recurse -Force "$PSScriptRoot\mod-structure\*" $distTargetDir -Exclude "About-Debug.xml"
     Copy-Item -Force $targetPath $distAssemblyDir
 
-    if ($VSConfiguration = "Debug"){
+    if ($VSConfiguration -eq "Debug"){
         $AboutFilePath = "$distTargetDir\About\About.xml"
         Copy-Item -Force "$PSScriptRoot\mod-structure\About\About-Debug.xml" $AboutFilePath
         $filePath = "C:\path\to\your\file.txt"
@@ -213,25 +227,7 @@ function doPostBuild
     }
     Copy-Item -Force $targetPath $modStructureAssemblyLocation
 
-    Write-Host "Creating distro package"
-    $content = Get-Content -Raw $assemblyInfoFile
-    if (!($content -match '"(\d+\.\d+\.\d+\.\d+)"'))
-    {
-        throw "Version info not found in $assemblyInfoFile"
-    }
-
-    $version = $matches[1]
-    $distZip = "$distDir\$targetName.$version.zip"
-    removePath $distZip
-    $sevenZip = "$PSScriptRoot\7z.exe"
-    & $sevenZip a -mx=9 "$distZip" "$distDir\*"
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw "7zip command failed"
-    }
-
-    Write-Host "Created $distZip"
-
+    createModZipFile
     copyFilesToRimworld
 }
 
