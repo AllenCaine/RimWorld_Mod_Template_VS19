@@ -6,7 +6,7 @@ using UnityEngine;
 using Verse;
 
 namespace ModName
-{
+{ 
     public class Mod : Verse.Mod
     {
         public Mod(ModContentPack content) : base(content)
